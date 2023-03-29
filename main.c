@@ -1,0 +1,228 @@
+#include "uart.h" 
+#include <cmsis_os2.h>
+#include <lpc17xx.h> 
+#include <stdio.h> 
+#include "random.h" 
+
+//defining global constants
+#define K 10
+#define N 2
+#define SERVER_FREQ 10
+#define CLIENT_FREQ 9
+
+typedef struct {
+	
+	osMessageQueueId_t q_id;
+	double sleep_time;
+	double avg_loss_ratio;
+	double avg_arrival_rate;
+	double avg_service_rate;
+	double elapsed_time;
+	uint32_t dropped;
+	uint32_t total_sent;
+	uint32_t total_recieved;
+
+} MSGQUE_t;
+
+//This will just set the LEDs to the binary representation of a given unsigned char.
+//Quite useful for debugging.
+void charToBinLED(unsigned char c)
+{
+		if(c&1)
+			LPC_GPIO1->FIOSET |= 1<<28;
+		else
+			LPC_GPIO1->FIOCLR |= 1<<28;
+		if(c&2)
+			LPC_GPIO1->FIOSET |= 1<<29;
+		else
+			LPC_GPIO1->FIOCLR |= 1<<29;
+		if(c&4)
+			LPC_GPIO1->FIOSET |= 1U<<31;
+		else
+			LPC_GPIO1->FIOCLR |= 1U<<31;
+		if(c&8)
+			LPC_GPIO2->FIOSET |= 1<<2;
+		else
+			LPC_GPIO2->FIOCLR |= 1<<2;
+		if(c&16)
+			LPC_GPIO2->FIOSET |= 1<<3;
+		else
+			LPC_GPIO2->FIOCLR |= 1<<3;
+		if(c&32)
+			LPC_GPIO2->FIOSET |= 1<<4;
+		else
+			LPC_GPIO2->FIOCLR |= 1<<4;
+		if(c&64)
+			LPC_GPIO2->FIOSET |= 1<<5;
+		else
+			LPC_GPIO2->FIOCLR |= 1<<5;
+		if(c&128)
+			LPC_GPIO2->FIOSET |= 1<<6;
+		else
+			LPC_GPIO2->FIOCLR |= 1<<6;
+}
+
+//set the LED pins to be outputs
+void initLEDPins()
+{
+	//set the LEDs to be outputs. You may or may not care about this
+	LPC_GPIO1->FIODIR |= 1<<28; //LED on pin 28
+	LPC_GPIO1->FIODIR |= 1<<29;
+	LPC_GPIO1->FIODIR |= 1U<<31;
+	LPC_GPIO2->FIODIR |= 1<<2;
+	LPC_GPIO2->FIODIR |= 1<<3;
+	LPC_GPIO2->FIODIR |= 1<<4;
+	LPC_GPIO2->FIODIR |= 1<<5;
+	LPC_GPIO2->FIODIR |= 1<<6;
+}
+
+//create a single message queue for testing purposes only. It will be initialized in main
+osMessageQueueId_t q_id; 
+
+/*
+	
+	Our client will send a message once every second
+
+*/
+
+//main array of queues
+MSGQUE_t msgqueue[N];
+
+//client function
+void client(void* args)
+{
+	int msg = 0;
+	MSGQUE_t *newque = (MSGQUE_t*) args;
+
+	while(1)
+	{
+		double delay,tickfreq;
+		                          
+	  //counting total number of messages successfully sent
+		newque->total_sent++;
+
+		//sending a message in client thread
+		osStatus_t stat = osMessageQueuePut(newque->q_id,&msg,0,0);
+		
+		//checking if message was successfully put into the queue
+		if(stat==osOK)
+		{
+			newque->total_recieved++;
+		}
+		//the message queue is full and if the message was lost
+		else
+		{
+			newque->dropped++;
+		}
+		
+		//delay for tick frequency number of ticks. This means 1 second. 
+		//We do not need to yield because of this delay 
+		tickfreq = osKernelGetTickFreq();
+		delay = get_random_delay_seconds(CLIENT_FREQ, tickfreq);
+		osDelay(delay);
+		
+	}
+	
+}
+
+//server function
+void server(void* args)
+{
+	int receivedMessage=0;
+	MSGQUE_t *newque = (MSGQUE_t*) args;
+	
+	while(1)
+	{
+
+		//receiving a message in server thread
+		osStatus_t stat = osMessageQueueGet(newque->q_id,&receivedMessage,NULL,osWaitForever);
+ 		
+		//delay for tick frequency number of ticks. This means 1 second. 
+		//We do not need to yield because of this delay
+		double delay,tickfreq;
+		tickfreq = osKernelGetTickFreq();
+		delay = get_random_delay_seconds(SERVER_FREQ, tickfreq);
+		osDelay(delay);
+		
+		//adding to sleep time
+		newque->sleep_time += (delay/tickfreq);
+		//adding to elapsed time
+		newque->elapsed_time += (delay/tickfreq);
+	
+		//we're just going to print the message to the LEDs, mod 256:
+		charToBinLED((unsigned char)(receivedMessage % 256));
+			
+		//We need to yield because it is possible that this thread wakes and sees 
+		//a message right away and we aren't using priority in this course
+		osThreadYield();
+
+	}
+	
+}
+
+//monitor function
+void monitor(void *args)
+{
+	uint32_t count=0;
+
+	while (1)
+	{
+		count++;
+		//Once per Second
+		osDelay(osKernelGetTickFreq());
+
+		for(int i = 0; i < N; i++)
+		{
+			//Average Message Loss ratio (number of overflows divided by total messages sent)
+			msgqueue[i].avg_loss_ratio = ((double)(msgqueue[i].dropped)/(double)(msgqueue[i].total_sent));
+
+			//Average Message Arrival Rate(total number of messages sent divided by the elapsed time)
+			msgqueue[i].avg_arrival_rate = ((double)(msgqueue[i].total_sent)/(msgqueue[i].elapsed_time));
+
+			//Average Service Rate (total number of received messages divided by the sum of server random sleep time)
+			msgqueue[i].avg_service_rate = ((double)(msgqueue[i].total_recieved)/(msgqueue[i].sleep_time));
+		
+			//printing all values to putty
+			printf("%d,%d,%d,%d,%f,%f,%f,%f\n",count,msgqueue[i].total_sent,msgqueue[i].total_recieved,
+			msgqueue[i].dropped, msgqueue[i].elapsed_time, msgqueue[i].avg_loss_ratio,
+			msgqueue[i].avg_arrival_rate, msgqueue[i].avg_service_rate);
+
+		}
+		
+	}
+	
+}
+
+//main function
+int main(void)
+{
+	//always call this function first
+	SystemInit();
+	initLEDPins();
+	
+	//we need to initialize printf outside of any threads
+	printf("Project 4 ready\n"); 
+	
+	//initialize the kernel
+	osKernelInitialize();
+
+	//initializing client and server while making new queue.
+	for (int i = 0; i < N; i++)
+	{
+		//initialize our message queue: 10 messages that are integers with default parameters (the "NULL" part means "Let the OS figure out the configuration")
+		msgqueue[i].q_id = osMessageQueueNew(K,sizeof(int),NULL);
+		
+		//set up the threads
+		osThreadNew(client,&msgqueue[i],NULL);
+		osThreadNew(server,&msgqueue[i],NULL);
+
+	}
+	
+	//initializing montior thread.
+	osThreadNew(monitor, NULL, NULL);
+	
+	//starting the kernal
+	osKernelStart();
+	
+	while(1);
+}
